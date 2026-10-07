@@ -5,12 +5,60 @@ use App\Data\TransactionData;
 use App\Enums\TransactionStatus;
 use App\Enums\TransactionType;
 use App\Exceptions\InsufficientBalanceException;
+use App\Exceptions\InvalidTransactionException;
 use App\Models\Account;
 use App\Models\Transaction;
 use Illuminate\Support\Str;
 
 beforeEach(function () {
     $this->transactionService = app(TransactionServiceInterface::class);
+});
+
+test('cant execute transactions with amount lower or equals to zero', function () {
+    $account = Account::factory()->create([
+        'balance' => 10000, // 100.00
+    ]);
+
+    $transaction = Transaction::factory()->make([
+        'amount' => 0, // 50.00
+        'type' => TransactionType::DEPOSIT,
+        'destination_account_id' => $account->id,
+    ]);
+
+    $transactionData = TransactionData::from($transaction);
+
+    expect(fn () => ($this->transactionService->execute($transactionData, Str::uuid())))->toThrow(InvalidTransactionException::class);
+
+    $this->assertDatabaseMissing('transactions', [
+        'amount' => 0,
+        'type' => TransactionType::DEPOSIT,
+        'destination_account_id' => $account->id,
+    ]);
+});
+
+test('cant execute transactions between same account', function () {
+    $sourceAccount = Account::factory()->create([
+        'balance' => 10000, // 100.00
+    ]);
+
+    $transaction = Transaction::factory()->make([
+        'amount' => 5000, // 50.00
+        'type' => TransactionType::TRANSFER,
+        'source_account_id' => $sourceAccount->id,
+        'destination_account_id' => $sourceAccount->id,
+    ]);
+
+    $transactionData = TransactionData::from($transaction);
+
+    expect(fn () => $this->transactionService->execute($transactionData, Str::uuid()))->toThrow(InvalidTransactionException::class);
+
+    $this->assertDatabaseMissing('transactions', [
+        'amount' => 5000,
+        'type' => TransactionType::TRANSFER,
+        'status' => TransactionStatus::PROCESSED,
+        'source_account_id' => $sourceAccount->id,
+        'destination_account_id' => $sourceAccount->id,
+    ]);
 });
 
 test('can withdraw from an account', function () {
