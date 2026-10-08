@@ -2,6 +2,7 @@
 
 use App\Contracts\TransactionServiceInterface;
 use App\Data\TransactionData;
+use App\Enums\OutboxStatus;
 use App\Enums\TransactionStatus;
 use App\Enums\TransactionType;
 use App\Exceptions\InsufficientBalanceException;
@@ -34,6 +35,8 @@ test('cant execute transactions with amount lower or equals to zero', function (
         'type' => TransactionType::DEPOSIT,
         'destination_account_id' => $account->id,
     ]);
+
+    $this->assertDatabaseCount('outboxes', 0);
 });
 
 test('cant execute transactions between same account', function () {
@@ -59,6 +62,8 @@ test('cant execute transactions between same account', function () {
         'source_account_id' => $sourceAccount->id,
         'destination_account_id' => $sourceAccount->id,
     ]);
+
+    $this->assertDatabaseCount('outboxes', 0);
 });
 
 test('can withdraw from an account', function () {
@@ -85,6 +90,16 @@ test('can withdraw from an account', function () {
     $this->assertDatabaseHas('transactions', [
         'amount' => 5000,
         'source_account_id' => $account->id,
+    ]);
+
+    $this->assertDatabaseHas('outboxes', [
+        'event_type' => 'transaction.processed',
+        'payload->transaction->amount' => 5000,
+        'payload->transaction->type' => TransactionType::WITHDRAW,
+        'payload->transaction->status' => TransactionStatus::PROCESSED,
+        'payload->transaction->source_account_id' => $account->id,
+        'status' => OutboxStatus::PENDING,
+        'retry_count' => 0,
     ]);
 });
 
@@ -115,6 +130,17 @@ test('withdraw without sufficient balance throws exception', function () {
         'status' => TransactionStatus::FAILED,
         'source_account_id' => $account->id,
     ]);
+
+    $this->assertDatabaseHas('outboxes', [
+        'event_type' => 'transaction.failed',
+        'payload->transaction->amount' => 15000,
+        'payload->transaction->type' => TransactionType::WITHDRAW,
+        'payload->transaction->status' => TransactionStatus::FAILED,
+        'payload->transaction->source_account_id' => $account->id,
+        'payload->error' => (new InsufficientBalanceException)->getMessage(),
+        'status' => OutboxStatus::PENDING,
+        'retry_count' => 0,
+    ]);
 });
 
 test('can deposit into an account', function () {
@@ -143,6 +169,15 @@ test('can deposit into an account', function () {
         'type' => TransactionType::DEPOSIT,
         'status' => TransactionStatus::PROCESSED,
         'destination_account_id' => $account->id,
+    ]);
+
+    $this->assertDatabaseHas('outboxes', [
+        'event_type' => 'transaction.processed',
+        'payload->transaction->amount' => 5000,
+        'payload->transaction->type' => TransactionType::DEPOSIT,
+        'payload->transaction->destination_account_id' => $account->id,
+        'status' => OutboxStatus::PENDING,
+        'retry_count' => 0,
     ]);
 });
 
@@ -183,6 +218,16 @@ test('can create transactions between accounts', function () {
         'status' => TransactionStatus::PROCESSED,
         'source_account_id' => $sourceAccount->id,
         'destination_account_id' => $destinationAccount->id,
+    ]);
+
+    $this->assertDatabaseHas('outboxes', [
+        'event_type' => 'transaction.processed',
+        'payload->transaction->amount' => 5000,
+        'payload->transaction->type' => TransactionType::TRANSFER,
+        'payload->transaction->source_account_id' => $sourceAccount->id,
+        'payload->transaction->destination_account_id' => $destinationAccount->id,
+        'status' => OutboxStatus::PENDING,
+        'retry_count' => 0,
     ]);
 });
 
@@ -225,4 +270,15 @@ test('transaction without sufficient balance throws exception', function () {
         'destination_account_id' => $destinationAccount->id,
     ]);
 
+    $this->assertDatabaseHas('outboxes', [
+        'event_type' => 'transaction.failed',
+        'payload->transaction->amount' => 15000,
+        'payload->transaction->type' => TransactionType::TRANSFER,
+        'payload->transaction->status' => TransactionStatus::FAILED,
+        'payload->transaction->source_account_id' => $sourceAccount->id,
+        'payload->transaction->destination_account_id' => $destinationAccount->id,
+        'payload->error' => (new InsufficientBalanceException)->getMessage(),
+        'status' => OutboxStatus::PENDING,
+        'retry_count' => 0,
+    ]);
 });
