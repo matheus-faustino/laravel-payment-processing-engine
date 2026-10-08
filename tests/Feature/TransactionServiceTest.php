@@ -9,7 +9,10 @@ use App\Exceptions\InsufficientBalanceException;
 use App\Exceptions\InvalidTransactionException;
 use App\Models\Account;
 use App\Models\Transaction;
+use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Facades\Concurrency;
 use Illuminate\Support\Str;
+use Tests\Support\ConcurrentWithdraw;
 
 beforeEach(function () {
     $this->transactionService = app(TransactionServiceInterface::class);
@@ -281,4 +284,81 @@ test('transaction without sufficient balance throws exception', function () {
         'status' => OutboxStatus::PENDING,
         'retry_count' => 0,
     ]);
+});
+
+test('executing transaction with same idempotency key does not reprocess', function () {
+    $account = Account::factory()->create([
+        'balance' => 10000, // 100.00,
+    ]);
+
+    $transactionData = TransactionData::from(Transaction::factory()->make([
+        'amount' => 5000, // 50.00,
+        'type' => TransactionType::WITHDRAW,
+        'source_account_id' => $account->id,
+    ]));
+
+    $idempotencyKey = (string) Str::uuid();
+
+    $this->transactionService->execute($transactionData, $idempotencyKey);
+
+    // Second execution with same idempotency key
+    expect(fn () => $this->transactionService->execute($transactionData, $idempotencyKey))->toThrow(UniqueConstraintViolationException::class);
+
+    $this->assertDatabaseHas('accounts', [
+        'id' => $account->id,
+        'balance' => 5000,
+    ]);
+
+    $this->assertDatabaseCount('transactions', 1);
+    $this->assertDatabaseCount('outboxes', 1);
+});
+
+test('concurrent withdraws doesnt cause double spent', function () {
+    $account = Account::factory()->create([
+        'balance' => 5000, // 50.00
+    ]);
+
+    $results = Concurrency::run([
+        ConcurrentWithdraw::task($account->id, 5000),
+        ConcurrentWithdraw::task($account->id, 5000),
+    ]);
+
+    $this->assertDatabaseHas('accounts', [
+        'id' => $account->id,
+        'balance' => 0,
+    ]);
+
+    expect(array_values($results))->toEqualCanonicalizing(['processed', 'failed']);
+
+    $this->assertDatabaseCount('transactions', 2);
+
+    $this->assertDatabaseHas('transactions', [
+        'source_account_id' => $account->id,
+        'amount' => 5000,
+        'type' => TransactionType::WITHDRAW,
+        'status' => TransactionStatus::PROCESSED,
+    ]);
+
+    $this->assertDatabaseHas('transactions', [
+        'source_account_id' => $account->id,
+        'amount' => 5000,
+        'type' => TransactionType::WITHDRAW,
+        'status' => TransactionStatus::FAILED,
+    ]);
+});
+
+test('concurrent requests with same idempotency key process just once', function() {
+    $account = Account::factory()->create([
+        'balance' => 10000, // 100.00
+    ]);
+
+    $idempotencyKey = (string) Str::uuid();
+
+    Concurrency::run([
+        ConcurrentWithdraw::task($account->id, 5000, $idempotencyKey),
+        ConcurrentWithdraw::task($account->id, 5000, $idempotencyKey),
+    ]);
+
+    $this->assertDatabaseHas('accounts', ['id' => $account->id, 'balance' => 5000]);
+    $this->assertDatabaseCount('transactions', 1);
 });

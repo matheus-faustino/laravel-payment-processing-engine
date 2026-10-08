@@ -1,6 +1,6 @@
 <?php
 
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Foundation\Testing\DatabaseTruncation;
 use Tests\TestCase;
 
 /*
@@ -12,10 +12,14 @@ use Tests\TestCase;
 | case class. By default, that class is "PHPUnit\Framework\TestCase". Of course, you may
 | need to change it using the "pest()" function to bind different classes or traits.
 |
+| DatabaseTruncation is used instead of RefreshDatabase because concurrency
+| tests run in isolated PHP processes and can only see committed data. Wrapping
+| each test in a transaction would hide the fixture rows from those processes.
+|
 */
 
 pest()->extend(TestCase::class)
-    ->use(RefreshDatabase::class)
+    ->use(DatabaseTruncation::class)
     ->in('Feature');
 
 /*
