@@ -4,12 +4,15 @@ namespace App\Services;
 
 use App\Contracts\TransactionServiceInterface;
 use App\Data\TransactionData;
+use App\Enums\OutboxStatus;
 use App\Enums\TransactionStatus;
 use App\Enums\TransactionType;
 use App\Exceptions\InsufficientBalanceException;
 use App\Exceptions\InvalidTransactionException;
 use App\Models\Account;
+use App\Models\Outbox;
 use App\Models\Transaction;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\Response;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
@@ -30,17 +33,17 @@ class TransactionService implements TransactionServiceInterface
             throw new InvalidTransactionException('The transaction cant be excuted between the same accounts', Response::HTTP_BAD_REQUEST);
         }
 
-        $transaction = Transaction::create([
-            'source_account_id' => $transactionData->sourceAccountId,
-            'destination_account_id' => $transactionData->destinationAccountId,
-            'amount' => $transactionData->amount,
-            'type' => $transactionData->type,
-            'status' => TransactionStatus::PENDING,
-            'idempotency_key' => $idempotencyKey,
-        ]);
-
         try {
-            DB::transaction(function () use ($transaction) {
+            DB::transaction(function () use ($transactionData, $idempotencyKey) {
+
+                $transaction = Transaction::create([
+                    'source_account_id' => $transactionData->sourceAccountId,
+                    'destination_account_id' => $transactionData->destinationAccountId,
+                    'amount' => $transactionData->amount,
+                    'type' => $transactionData->type,
+                    'status' => TransactionStatus::PENDING,
+                    'idempotency_key' => $idempotencyKey,
+                ]);
 
                 match ($transaction->type) {
                     TransactionType::DEPOSIT => $this->processDeposit($transaction),
@@ -50,9 +53,16 @@ class TransactionService implements TransactionServiceInterface
 
                 $transaction->update(['status' => TransactionStatus::PROCESSED]);
 
+                Outbox::create([
+                    'event_type' => 'transaction.processed',
+                    'payload' => json_encode($transaction->toArray()),
+                    'status' => OutboxStatus::PENDING,
+                ]);
             });
+        } catch (UniqueConstraintViolationException $e) {
+            throw $e;
         } catch (Throwable $e) {
-            $transaction->update(['status' => TransactionStatus::FAILED]);
+            $this->markAsFailed($transactionData, $idempotencyKey, $e);
 
             throw $e;
         }
@@ -94,5 +104,29 @@ class TransactionService implements TransactionServiceInterface
 
         $sourceAccount->decrement('balance', $transaction->amount);
         $destinationAccount->increment('balance', $transaction->amount);
+    }
+
+    #[Override]
+    public function markAsFailed(TransactionData $transactionData, string $idempotencyKey, Throwable $e): void
+    {
+        DB::transaction(function () use ($transactionData, $idempotencyKey, $e) {
+            $transaction = Transaction::create([
+                'source_account_id' => $transactionData->sourceAccountId,
+                'destination_account_id' => $transactionData->destinationAccountId,
+                'amount' => $transactionData->amount,
+                'type' => $transactionData->type,
+                'status' => TransactionStatus::FAILED,
+                'idempotency_key' => $idempotencyKey,
+            ]);
+
+            Outbox::create([
+                'event_type' => 'transaction.failed',
+                'payload' => json_encode([
+                    'transaction' => $transaction->toArray(),
+                    'error' => $e->getMessage(),
+                ]),
+                'status' => OutboxStatus::PENDING,
+            ]);
+        });
     }
 }
