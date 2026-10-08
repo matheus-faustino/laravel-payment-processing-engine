@@ -55,7 +55,7 @@ class TransactionService implements TransactionServiceInterface
 
                 Outbox::create([
                     'event_type' => 'transaction.processed',
-                    'payload' => json_encode($transaction->toArray()),
+                    'payload' => $transaction->toArray(),
                     'status' => OutboxStatus::PENDING,
                 ]);
             });
@@ -121,10 +121,10 @@ class TransactionService implements TransactionServiceInterface
 
             Outbox::create([
                 'event_type' => 'transaction.failed',
-                'payload' => json_encode([
+                'payload' => [
                     'transaction' => $transaction->toArray(),
                     'error' => $e->getMessage(),
-                ]),
+                ],
                 'status' => OutboxStatus::PENDING,
             ]);
         });
